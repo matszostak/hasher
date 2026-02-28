@@ -1,0 +1,16 @@
+[package]
+name = "hasher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walkdir = "2"
+crossbeam-channel = "0.5"
+num_cpus = "1"
+chrono = "0.4"
+crossterm = "0.27"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }
+clap = { version = "4.5.59", features = ["derive"] }
+sha2 = "0.10.9"
+sha1 = "0.10.6"
+md5 = "0.8.0"
