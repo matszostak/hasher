@@ -169,8 +169,8 @@ fn main() {
 
     // WALK FILES
     for entry in WalkDir::new(target_dir)
-        .follow_links(false) // safer for forensics
-        .same_file_system(false) // allow crossing mount points
+        .follow_links(false)
+        .same_file_system(false)
         .into_iter()
 
     {
@@ -239,8 +239,9 @@ fn worker_loop(
                 csv_separator,
                 path.display()
             );
-
-            writer_tx.send(WriterMsg::Hash(line)).ok();
+            
+            writer_tx.send(WriterMsg::Hash(line.clone())).ok();
+            println!("{}", line);
         }
     }
 }
