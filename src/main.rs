@@ -1,28 +1,13 @@
 use clap::{Parser, ValueEnum};
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
-use crossterm::{
-    cursor::{Hide, MoveTo},
-    execute,
-    terminal::{Clear, ClearType},
-};
-use std::io::{Stdout, Write, stdout};
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use std::io::{Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
-use std::{
-    fs::{File, OpenOptions},
-    path::Path,
-};
+use std::{fs::OpenOptions, path::Path};
 use walkdir::WalkDir;
 
-mod dashboard;
 mod hash;
 
-enum UiMsg {
-    WorkerStatus { worker_id: usize, text: String },
-    FileDone,
-}
 
 enum WriterMsg {
     Hash(String),
@@ -45,67 +30,74 @@ enum CSVSeparator {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None, term_width = 120, max_term_width = 200)]
 
 struct Args {
-    /// Algorithm to use //TODO: use multiple algorithms
-    #[arg(short, long, value_enum, default_value_t = Algorithm::Md5)]
-    algorithm: Algorithm,
+    /// Algorithm(s) to use. Provide multiple values to use multiple algorithms
+    #[arg(short, long, num_args = 1..4)] // 4 Algorithms
+    algorithm: Vec<Algorithm>,
 
     /// Target directory
     #[arg(short, long)]
     target: String,
 
-    /// Output directory
+    /// Output file
     #[arg(short, long, default_value = "hashes.txt")]
-    out: String,
+    out_path: String,
 
     /// Number of worker threads
     #[arg(short, long, default_value_t = 8)]
     count: u8,
 
-    /// Creates a log file if specified // TODO
-    #[arg(short, long = "log", default_value = "none")]
-    log_path: String,
+    /// Creates a log file if specified
+    #[arg(short, long = "log")]
+    log_path: Option<String>,
 
     /// CSV separator for the output file
     #[arg(short='s', long="csv_separator", value_enum, default_value_t = CSVSeparator::Spaces)]
     csv_separator: CSVSeparator,
+
+    /// Skip CSV header in output file
+    #[arg(long="skip_header", action = clap::ArgAction::SetTrue)]
+    skip_header: bool,
+
+    /// Use experimental UI - work in progress
+    #[arg(long="experimentalui", action = clap::ArgAction::SetTrue)]
+    experimental_ui: bool,
 }
 
 fn main() {
     let args = Args::parse();
     let target_dir = args.target;
-    let output_path = args.out;
-    let hash_algorithm = args.algorithm;
+    let output_path = args.out_path;
+    let hash_algorithm: Vec<Algorithm> = args.algorithm;
     let csv_separator = args.csv_separator;
     let log_path = args.log_path;
+    let skip_header = args.skip_header;
+    let _experimental_ui = args.experimental_ui;
 
     if !Path::new(&target_dir).exists() {
         eprintln!("Target directory does not exist.");
         return;
     }
 
+    let csv_separator_str: &str;
+    match csv_separator {
+        CSVSeparator::Comma => csv_separator_str = ",",
+        CSVSeparator::Spaces => csv_separator_str = "   ",
+        CSVSeparator::Pipe => csv_separator_str = "|",
+    }
+    let hashes_str_vec = hash_algorithm
+        .iter()
+        .map(|a| format!("{:?}", a))
+        .collect::<Vec<_>>()
+        .join(csv_separator_str);
+    let hashes_str_vec_clone = hashes_str_vec.clone();
+
     let (work_tx, work_rx) = unbounded::<PathBuf>();
     let (writer_tx, writer_rx) = unbounded::<WriterMsg>();
-    let (ui_tx, ui_rx) = unbounded::<UiMsg>();
 
-    let output_file = Arc::new(Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(output_path.to_string())
-            .unwrap(),
-    ));
-
-    // let worker_count = num_cpus::get();
     let worker_count = args.count.into();
-
-    // UI THREAD
-    let ui_handle = {
-        let stdout = Arc::new(Mutex::new(stdout()));
-        thread::spawn(move || ui_loop(ui_rx, worker_count, stdout))
-    };
 
     let writer_handle = thread::spawn(move || {
         let mut f = OpenOptions::new()
@@ -114,19 +106,24 @@ fn main() {
             .open(output_path)
             .unwrap();
 
-        /* for line in writer_rx {
-            writeln!(f, "{}", line).unwrap();
-        } */
-
         let mut log_f: Option<std::fs::File> = None;
-        if log_path != "none" {
+        if log_path.is_some() {
             log_f = Some(
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(log_path)
+                    .open(log_path.unwrap())
                     .unwrap(),
             );
+        }
+
+        if !skip_header {
+            writeln!(
+                f,
+                "{}",
+                format!("{}{}{}", hashes_str_vec, csv_separator_str, "path")
+            )
+            .ok();
         }
 
         while let Ok(msg) = writer_rx.recv() {
@@ -148,22 +145,25 @@ fn main() {
         }
     });
 
-    writer_tx.send(WriterMsg::Log(format!("START"))).ok();  // TODO - add time of start
+    writer_tx.send(WriterMsg::Log(format!("START"))).ok(); // TODO - add time of start
     writer_tx.send(WriterMsg::Log(format!("Hasher"))).ok();
     writer_tx.send(WriterMsg::Log(format!("Options:"))).ok();
-    writer_tx.send(WriterMsg::Log(format!("Algorithm: {:#?}", hash_algorithm))).ok();
+    writer_tx
+        .send(WriterMsg::Log(format!(
+            "Algorithm: {}",
+            hashes_str_vec_clone
+        )))
+        .ok();
 
     // WORKERS
     let mut handles = Vec::new();
-    for worker_id in 0..worker_count {
+    for _worker_id in 0..worker_count {
         let rx = work_rx.clone();
-        let ui_tx = ui_tx.clone();
         let writer_tx = writer_tx.clone();
-        let file = output_file.clone();
-        let algo = hash_algorithm;
+        let algo = hash_algorithm.clone();
 
         handles.push(thread::spawn(move || {
-            worker_loop(rx, ui_tx, writer_tx, file, worker_id, algo, csv_separator)
+            worker_loop(rx, writer_tx, algo, csv_separator_str)
         }));
     }
 
@@ -172,7 +172,7 @@ fn main() {
         .follow_links(false) // safer for forensics
         .same_file_system(false) // allow crossing mount points
         .into_iter()
-    //.filter(|e| e.file_type().is_file())
+
     {
         match entry {
             Ok(entry) => {
@@ -192,175 +192,55 @@ fn main() {
     writer_tx.send(WriterMsg::Log(format!("END"))).ok(); // TODO - add time of end
     drop(writer_tx);
     writer_handle.join().unwrap();
-    drop(ui_tx);
-    ui_handle.join().unwrap();
-
-    
 }
 
 fn worker_loop(
-    rx: Receiver<PathBuf>,
-    ui_tx: Sender<UiMsg>,
+    rx: Receiver<PathBuf>, 
     writer_tx: Sender<WriterMsg>,
-    output_file: Arc<Mutex<File>>,
-    worker_id: usize,
-    hash_algorithm: Algorithm,
-    csv_separator: CSVSeparator,
+    hash_algorithm: Vec<Algorithm>,
+    csv_separator: &str,
 ) {
-    let sep: &str;
-    match csv_separator {
-        CSVSeparator::Comma => sep = ",",
-        CSVSeparator::Spaces => sep = "   ",
-        CSVSeparator::Pipe => sep = "|",
-    }
     for path in rx.iter() {
-        let path_str = truncate_path(&path.display().to_string());
+        let mut hashes = Vec::with_capacity(hash_algorithm.len());
+        let mut error_occurred = false;
 
-        ui_tx
-            .send(UiMsg::WorkerStatus {
-                worker_id,
-                text: format!("HASH {}", path_str),
-            })
-            .ok();
+        for algo in &hash_algorithm {
+            let result = match algo {
+                Algorithm::Md5 => hash::hash_file_md5(&path),
+                Algorithm::Sha1 => hash::hash_file_sha1(&path),
+                Algorithm::Sha256 => hash::hash_file_sha256(&path),
+            };
 
-        match hash_algorithm {
-            Algorithm::Md5 => match hash::hash_file_md5(&path) {
+            match result {
                 Ok((hash, _bytes)) => {
-                    ui_tx.send(UiMsg::FileDone).ok();
-
-                    let mut _f = output_file.lock().unwrap();
-                    // writeln!(f, "{}  {}", hash, path.display()).ok();
-                    writer_tx
-                        .send(WriterMsg::Hash(format!(
-                            "{}{}{}",
-                            hash,
-                            sep,
-                            path.display()
-                        )))
-                        .ok();
+                    hashes.push(hash);
                 }
                 Err(e) => {
-                    /* ui_tx
-                    .send(UiMsg::WorkerStatus {
-                        worker_id,
-                        text: format!("ERR  {}", e),
-                    })
-                    .ok(); */
-                    writer_tx
-                        .send(WriterMsg::Error(format!("{}{}{}", path.display(), sep, e)))
-                        .ok();
-                }
-            },
-            Algorithm::Sha1 => match hash::hash_file_sha1(&path) {
-                Ok((hash, _bytes)) => {
-                    ui_tx.send(UiMsg::FileDone).ok();
+                    error_occurred = true;
 
-                    let mut _f = output_file.lock().unwrap();
                     writer_tx
-                        .send(WriterMsg::Hash(format!(
+                        .send(WriterMsg::Error(format!(
                             "{}{}{}",
-                            hash,
-                            sep,
-                            path.display()
+                            path.display(),
+                            csv_separator,
+                            e
                         )))
                         .ok();
+
+                    break;
                 }
-                Err(e) => {
-                    /* ui_tx
-                    .send(UiMsg::WorkerStatus {
-                        worker_id,
-                        text: format!("ERR  {}", e),
-                    })
-                    .ok(); */
-                    writer_tx
-                        .send(WriterMsg::Error(format!("{}{}{}", path.display(), sep, e)))
-                        .ok();
-                }
-            },
-            Algorithm::Sha256 => match hash::hash_file_sha256(&path) {
-                Ok((hash, _bytes)) => {
-                    ui_tx.send(UiMsg::FileDone).ok();
-
-                    let mut _f = output_file.lock().unwrap();
-                    writer_tx
-                        .send(WriterMsg::Hash(format!(
-                            "{}{}{}",
-                            hash,
-                            sep,
-                            path.display()
-                        )))
-                        .ok();
-                }
-                Err(e) => {
-                    /* ui_tx
-                    .send(UiMsg::WorkerStatus {
-                        worker_id,
-                        text: format!("ERR  {}", e),
-                    })
-                    .ok(); */
-                    writer_tx
-                        .send(WriterMsg::Error(format!("{}{}{}", path.display(), sep, e)))
-                        .ok();
-                }
-            },
-        }
-    }
-
-    ui_tx
-        .send(UiMsg::WorkerStatus {
-            worker_id,
-            text: "IDLE".into(),
-        })
-        .ok();
-}
-
-fn ui_loop(rx: Receiver<UiMsg>, workers: usize, stdout: Arc<Mutex<Stdout>>) {
-    let mut worker_lines = vec![String::from("Waiting"); workers];
-    let start = Instant::now();
-    let mut total_files = 0u64;
-    {
-        let mut out = stdout.lock().unwrap();
-        execute!(*out, Clear(ClearType::All), MoveTo(0, 0), Hide).unwrap();
-
-        out.flush().unwrap();
-        for _ in 0..(workers + 6) {
-            writeln!(out).unwrap();
-        }
-    }
-
-    loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(msg) => match msg {
-                UiMsg::WorkerStatus { worker_id, text } => {
-                    worker_lines[worker_id] = text;
-                }
-                UiMsg::FileDone => {
-                    total_files += 1;
-                }
-            },
-
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                // Normal — just redraw
-            }
-
-            Err(RecvTimeoutError::Disconnected) => {
-                // All workers + main dropped sender
-                break;
             }
         }
 
-        dashboard::draw_dashboard(&stdout, &worker_lines, total_files, start.elapsed());
-    }
+        if !error_occurred {
+            let line = format!(
+                "{}{}{}",
+                hashes.join(csv_separator),
+                csv_separator,
+                path.display()
+            );
 
-    // Final draw
-    dashboard::draw_dashboard(&stdout, &worker_lines, total_files, start.elapsed());
-}
-
-fn truncate_path(s: &str) -> String {
-    const MAX: usize = 60;
-    if s.len() > MAX {
-        format!("...{}", &s[s.len() - MAX..])
-    } else {
-        s.to_string()
+            writer_tx.send(WriterMsg::Hash(line)).ok();
+        }
     }
 }
