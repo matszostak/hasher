@@ -17,8 +17,8 @@ pub(crate) struct Args {
     pub out_path: String,
 
     /// Number of worker threads
-    #[arg(short, long, default_value_t = 8)]
-    pub count: u8,
+    #[arg(short, long)]
+    pub count: Option<usize>,
 
     /// Creates a log file if specified
     #[arg(short, long = "log")]

@@ -45,7 +45,7 @@ impl Hasher for Sha256Hasher {
     }
 }
 
-fn make_hasher(algo: &Algorithm) -> Box<dyn Hasher> {
+fn make_hasher(algo: Algorithm) -> Box<dyn Hasher> {
     match algo {
         Algorithm::Md5 => Box::new(Md5Hasher(Md5Context::new())),
         Algorithm::Sha1 => Box::new(Sha1Hasher(Sha1::new())),
@@ -54,7 +54,7 @@ fn make_hasher(algo: &Algorithm) -> Box<dyn Hasher> {
 }
 
 pub fn hash_file(path: &PathBuf, algorithms: &[Algorithm]) -> std::io::Result<(Vec<String>, u64)> {
-    let mut hashers: Vec<Box<dyn Hasher>> = algorithms.iter().map(make_hasher).collect();
+    let mut hashers: Vec<Box<dyn Hasher>> = algorithms.iter().map(|a| make_hasher(*a)).collect();
 
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -72,6 +72,6 @@ pub fn hash_file(path: &PathBuf, algorithms: &[Algorithm]) -> std::io::Result<(V
         }
     }
 
-    let hashes = hashers.into_iter().map(|h| h.finalize()).collect();
-    Ok((hashes, total))
+    let result_hashes = hashers.into_iter().map(Hasher::finalize).collect();
+    Ok((result_hashes, total))
 }
