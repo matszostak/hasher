@@ -20,4 +20,3 @@ is_elevated = "0.1.2"
 lazy_static = "1.5.0"
 whoami = "2.1.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
-

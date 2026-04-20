@@ -1,7 +1,11 @@
-use std::{fs::File, io::{BufReader, Read}, path::PathBuf};
 use md5::Context as Md5Context;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::PathBuf,
+};
 
 const BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -24,7 +28,6 @@ pub fn hash_file_md5(path: &PathBuf) -> std::io::Result<(String, u64)> {
     Ok((format!("{:x}", ctx.finalize()), total))
 }
 
-
 pub fn hash_file_sha1(path: &PathBuf) -> std::io::Result<(String, u64)> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -44,7 +47,6 @@ pub fn hash_file_sha1(path: &PathBuf) -> std::io::Result<(String, u64)> {
     Ok((format!("{:x}", hasher.finalize()), total))
 }
 
-
 pub fn hash_file_sha256(path: &PathBuf) -> std::io::Result<(String, u64)> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -62,5 +64,5 @@ pub fn hash_file_sha256(path: &PathBuf) -> std::io::Result<(String, u64)> {
     }
 
     let result = hasher.finalize();
-    Ok((format!("{:x}", result), total))
+    Ok((format!("{result:x}"), total))
 }

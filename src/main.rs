@@ -2,6 +2,7 @@ use clap::Parser;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::{fs, thread};
 use std::{fs::OpenOptions, path::Path};
 use walkdir::WalkDir;
@@ -12,7 +13,7 @@ extern crate whoami;
 
 mod hash;
 mod helpers;
-use helpers::*;
+use helpers::{Algorithm, CSVSeparator, RunTimeEnv, WriterMsg, convert_time_iso8601};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, term_width = 120, max_term_width = 200)]
 struct Args {
@@ -53,7 +54,7 @@ fn main() {
     let args = Args::parse();
     let target_dir = args.target;
     let output_path = args.out_path;
-    let hash_algorithm: Vec<Algorithm> = args.algorithm;
+    let hash_algorithm = args.algorithm;
     let csv_separator = args.csv_separator;
     let log_path = args.log_path;
     let skip_header = args.skip_header;
@@ -64,15 +65,14 @@ fn main() {
         return;
     }
 
-    let csv_separator_str: &str;
-    match csv_separator {
-        CSVSeparator::Comma => csv_separator_str = ",",
-        CSVSeparator::Spaces => csv_separator_str = "   ",
-        CSVSeparator::Pipe => csv_separator_str = "|",
-    }
+    let csv_separator_str = match csv_separator {
+        CSVSeparator::Comma => ",",
+        CSVSeparator::Spaces => "   ",
+        CSVSeparator::Pipe => "|",
+    };
     let hashes_str_vec = hash_algorithm
         .iter()
-        .map(|a| format!("{:?}", a))
+        .map(|algorithm| format!("{algorithm:?}"))
         .collect::<Vec<_>>()
         .join(csv_separator_str);
     let hashes_str_vec_clone = hashes_str_vec.clone();
@@ -90,12 +90,12 @@ fn main() {
             .unwrap();
 
         let mut log_f: Option<std::fs::File> = None;
-        if log_path.is_some() {
+        if let Some(log_path) = log_path {
             log_f = Some(
                 OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(log_path.unwrap())
+                    .open(log_path)
                     .unwrap(),
             );
         }
@@ -114,24 +114,11 @@ fn main() {
                 );
                 writeln!(
                     f,
-                    "{}",
-                    format!(
-                        "{}{}{}{}{}",
-                        hashes_str_vec,
-                        csv_separator_str,
-                        metadata_headers,
-                        csv_separator_str,
-                        "path"
-                    )
+                    "{hashes_str_vec}{csv_separator_str}{metadata_headers}{csv_separator_str}path"
                 )
                 .ok();
             } else {
-                writeln!(
-                    f,
-                    "{}",
-                    format!("{}{}{}", hashes_str_vec, csv_separator_str, "path")
-                )
-                .ok();
+                writeln!(f, "{hashes_str_vec}{csv_separator_str}path").ok();
             }
         }
 
@@ -155,8 +142,8 @@ fn main() {
         }
     });
     let env: RunTimeEnv = RunTimeEnv::default();
-    writer_tx.send(WriterMsg::Log(format!("START"))).ok();
-    writer_tx.send(WriterMsg::Log(format!("Hasher"))).ok();
+    writer_tx.send(WriterMsg::Log("START".to_string())).ok();
+    writer_tx.send(WriterMsg::Log("Hasher".to_string())).ok();
     writer_tx
         .send(WriterMsg::Log(format!("Time: {:#?}", env.timestamp)))
         .ok();
@@ -167,22 +154,22 @@ fn main() {
         .send(WriterMsg::Log(format!("Elevated: {:#?}", env.run_as_admin)))
         .ok();
     writer_tx
-        .send(WriterMsg::Log(format!(
-            "Algorithm: {}",
-            hashes_str_vec_clone
-        )))
+        .send(WriterMsg::Log(format!("Algorithm: {hashes_str_vec_clone}")))
         .ok();
-    writer_tx.send(WriterMsg::Log(format!("Log START:"))).ok();
+    writer_tx
+        .send(WriterMsg::Log("Log START:".to_string()))
+        .ok();
 
     // WORKERS
+    let algos: Arc<[Algorithm]> = hash_algorithm.into();
     let mut handles = Vec::new();
     for _worker_id in 0..worker_count {
         let rx = work_rx.clone();
         let writer_tx = writer_tx.clone();
-        let algo = hash_algorithm.clone();
+        let algo = Arc::clone(&algos);
 
         handles.push(thread::spawn(move || {
-            worker_loop(rx, writer_tx, algo, csv_separator_str, include_metadata)
+            worker_loop(rx, writer_tx, &algo, csv_separator_str, include_metadata);
         }));
     }
 
@@ -192,7 +179,7 @@ fn main() {
         .into_iter()
         .filter_map(|e| {
             if let Err(err) = &e {
-                writer_tx.send(WriterMsg::Error(format!("{}", err))).ok();
+                writer_tx.send(WriterMsg::Error(format!("{err}"))).ok();
             }
             e.ok()
         })
@@ -206,23 +193,24 @@ fn main() {
     for h in handles {
         h.join().unwrap();
     }
-    writer_tx.send(WriterMsg::Log(format!("END"))).ok(); // TODO - add time of end
+    writer_tx.send(WriterMsg::Log("END".to_string())).ok(); // TODO - add time of end
     drop(writer_tx);
     writer_handle.join().unwrap();
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn worker_loop(
     rx: Receiver<PathBuf>,
     writer_tx: Sender<WriterMsg>,
-    hash_algorithm: Vec<Algorithm>,
+    hash_algorithm: &Arc<[Algorithm]>,
     csv_separator: &str,
     include_metadata: bool,
 ) {
-    for path in rx.iter() {
+    for path in rx {
         let mut hashes = Vec::with_capacity(hash_algorithm.len());
         let mut error_occurred = false;
 
-        for algo in &hash_algorithm {
+        for algo in hash_algorithm.iter() {
             let result = match algo {
                 Algorithm::Md5 => hash::hash_file_md5(&path),
                 Algorithm::Sha1 => hash::hash_file_sha1(&path),
@@ -252,18 +240,9 @@ fn worker_loop(
             match metadata {
                 Ok(meta) => {
                     hashes.push(meta.len().to_string());
-                    hashes.push(
-                        convert_time_iso8601(meta.modified().unwrap())
-                            .unwrap_or("1970-01-01T02:00:00+02:00Z".to_owned()),
-                    );
-                    hashes.push(
-                        convert_time_iso8601(meta.accessed().unwrap())
-                            .unwrap_or("1970-01-01T02:00:00+02:00Z".to_owned()),
-                    );
-                    hashes.push(
-                        convert_time_iso8601(meta.created().unwrap())
-                            .unwrap_or("1970-01-01T02:00:00+02:00Z".to_owned()),
-                    );
+                    hashes.push(convert_time_iso8601(meta.modified().unwrap()));
+                    hashes.push(convert_time_iso8601(meta.accessed().unwrap()));
+                    hashes.push(convert_time_iso8601(meta.created().unwrap()));
                 }
                 Err(e) => {
                     error_occurred = true;
@@ -286,7 +265,7 @@ fn worker_loop(
                 path.display()
             );
             writer_tx.send(WriterMsg::Hash(line.clone())).ok();
-            println!("{}", line);
+            println!("{line}");
         }
     }
 }
