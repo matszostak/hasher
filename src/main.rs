@@ -86,7 +86,14 @@ fn main() {
         let algos = Arc::clone(&algos);
 
         handles.push(thread::spawn(move || {
-            worker_loop(rx, writer_tx, &algos, csv_separator_str, include_metadata, skip_std_out);
+            worker_loop(
+                rx,
+                writer_tx,
+                &algos,
+                csv_separator_str,
+                include_metadata,
+                skip_std_out,
+            );
         }));
     }
 
@@ -186,34 +193,20 @@ fn worker_loop(
     skip_std_out: bool,
 ) {
     for path in rx {
-        let mut hashes = Vec::with_capacity(hash_algorithm.len());
-        let mut error_occurred = false;
-
-        for algo in hash_algorithm.iter() {
-            let result = match algo {
-                Algorithm::Md5 => hash::hash_file_md5(&path),
-                Algorithm::Sha1 => hash::hash_file_sha1(&path),
-                Algorithm::Sha256 => hash::hash_file_sha256(&path),
-            };
-
-            match result {
-                Ok((hash, _bytes)) => {
-                    hashes.push(hash);
-                }
-                Err(e) => {
-                    error_occurred = true;
-                    writer_tx
-                        .send(WriterMsg::Error(format!(
-                            "{}{}{}",
-                            path.display(),
-                            csv_separator,
-                            e
-                        )))
-                        .ok();
-                    break;
-                }
+        let mut hashes = match hash::hash_file(&path, hash_algorithm) {
+            Ok((file_hashes, _bytes)) => file_hashes,
+            Err(e) => {
+                writer_tx
+                    .send(WriterMsg::Error(format!(
+                        "{}{}{}",
+                        path.display(),
+                        csv_separator,
+                        e
+                    )))
+                    .ok();
+                continue;
             }
-        }
+        };
         if include_metadata {
             let metadata = fs::metadata(&path);
             match metadata {
@@ -224,7 +217,6 @@ fn worker_loop(
                     hashes.push(convert_time_iso8601(meta.created().unwrap()));
                 }
                 Err(e) => {
-                    error_occurred = true;
                     writer_tx
                         .send(WriterMsg::Error(format!(
                             "{}{}{}",
@@ -233,20 +225,20 @@ fn worker_loop(
                             e
                         )))
                         .ok();
+                    continue;
                 }
             }
         }
-        if !error_occurred {
-            let line = format!(
-                "{}{}{}",
-                hashes.join(csv_separator),
-                csv_separator,
-                path.display()
-            );
-            if !skip_std_out {
-                println!("{}", &line);
-            }
-            writer_tx.send(WriterMsg::Hash(line)).ok();
+
+        let line = format!(
+            "{}{}{}",
+            hashes.join(csv_separator),
+            csv_separator,
+            path.display()
+        );
+        if !skip_std_out {
+            println!("{}", &line);
         }
+        writer_tx.send(WriterMsg::Hash(line)).ok();
     }
 }
