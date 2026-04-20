@@ -1,5 +1,5 @@
-use clap::Parser;
 use crate::helpers::{Algorithm, CSVSeparator};
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, term_width = 120, max_term_width = 200)]
@@ -35,4 +35,8 @@ pub(crate) struct Args {
     /// Include file metadata
     #[arg(long="metadata", action = clap::ArgAction::SetTrue)]
     pub metadata: bool,
+
+    /// Skip printing to stdout
+    #[arg(long)]
+    pub skip_std_out: bool,
 }

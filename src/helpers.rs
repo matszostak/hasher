@@ -20,11 +20,31 @@ pub enum Algorithm {
     Sha256,
 }
 
+impl Algorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Algorithm::Md5 => "Md5",
+            Algorithm::Sha1 => "Sha1",
+            Algorithm::Sha256 => "Sha256",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum CSVSeparator {
     Comma,
     Spaces,
     Pipe,
+}
+
+impl CSVSeparator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CSVSeparator::Comma => ",",
+            CSVSeparator::Spaces => "   ",
+            CSVSeparator::Pipe => "|",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -35,8 +55,8 @@ pub struct RunTimeEnv {
 }
 
 pub fn convert_time_iso8601(time: SystemTime) -> String {
-    let now: DateTime<Utc> = time.into();
-    now.to_rfc3339()
+    let time: DateTime<Utc> = time.into();
+    time.to_rfc3339()
 }
 
 impl Default for RunTimeEnv {

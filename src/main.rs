@@ -11,12 +11,12 @@ use walkdir::WalkDir;
 extern crate lazy_static;
 extern crate whoami;
 
+mod cli;
 mod hash;
 mod helpers;
-mod cli;
 
-use helpers::{Algorithm, CSVSeparator, RunTimeEnv, WriterMsg, convert_time_iso8601};
 use cli::Args;
+use helpers::{Algorithm, RunTimeEnv, WriterMsg, convert_time_iso8601};
 
 fn main() {
     let args = Args::parse();
@@ -27,20 +27,17 @@ fn main() {
     let log_path = args.log_path;
     let skip_header = args.skip_header;
     let include_metadata = args.metadata;
+    let skip_std_out = args.skip_std_out;
 
     if !Path::new(&target_dir).exists() {
         eprintln!("Target directory does not exist.");
         return;
     }
 
-    let csv_separator_str = match csv_separator {
-        CSVSeparator::Comma => ",",
-        CSVSeparator::Spaces => "   ",
-        CSVSeparator::Pipe => "|",
-    };
+    let csv_separator_str = csv_separator.as_str();
     let hashes_str_vec = hash_algorithm
         .iter()
-        .map(|algorithm| format!("{algorithm:?}"))
+        .map(|algo| algo.as_str())
         .collect::<Vec<_>>()
         .join(csv_separator_str);
     let hashes_str_vec_clone = hashes_str_vec.clone();
@@ -51,63 +48,15 @@ fn main() {
     let worker_count = args.count.into();
 
     let writer_handle = thread::spawn(move || {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(output_path)
-            .unwrap();
-
-        let mut log_f: Option<std::fs::File> = None;
-        if let Some(log_path) = log_path {
-            log_f = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_path)
-                    .unwrap(),
-            );
-        }
-
-        if !skip_header {
-            if include_metadata {
-                let metadata_headers = format!(
-                    "{}{}{}{}{}{}{}",
-                    "size",
-                    csv_separator_str,
-                    "modified",
-                    csv_separator_str,
-                    "accessed",
-                    csv_separator_str,
-                    "created",
-                );
-                writeln!(
-                    f,
-                    "{hashes_str_vec}{csv_separator_str}{metadata_headers}{csv_separator_str}path"
-                )
-                .ok();
-            } else {
-                writeln!(f, "{hashes_str_vec}{csv_separator_str}path").ok();
-            }
-        }
-
-        while let Ok(msg) = writer_rx.recv() {
-            match msg {
-                WriterMsg::Hash(line) => {
-                    writeln!(f, "{line}").ok();
-                }
-                WriterMsg::Error(line) => {
-                    if let Some(ref mut file) = log_f {
-                        writeln!(file, "ERR {line}").ok();
-                    }
-                }
-                WriterMsg::Log(line) => {
-                    if let Some(ref mut file) = log_f {
-                        writeln!(file, "LOG {line}").ok();
-                    }
-                }
-            }
-            // $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-        }
+        writer_loop(
+            output_path,
+            log_path,
+            skip_header,
+            include_metadata,
+            csv_separator_str,
+            hashes_str_vec,
+            writer_rx,
+        );
     });
     let env: RunTimeEnv = RunTimeEnv::default();
     writer_tx.send(WriterMsg::Log("START".to_string())).ok();
@@ -134,10 +83,10 @@ fn main() {
     for _worker_id in 0..worker_count {
         let rx = work_rx.clone();
         let writer_tx = writer_tx.clone();
-        let algo = Arc::clone(&algos);
+        let algos = Arc::clone(&algos);
 
         handles.push(thread::spawn(move || {
-            worker_loop(rx, writer_tx, &algo, csv_separator_str, include_metadata);
+            worker_loop(rx, writer_tx, &algos, csv_separator_str, include_metadata, skip_std_out);
         }));
     }
 
@@ -167,12 +116,74 @@ fn main() {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn writer_loop(
+    output_path: String,
+    log_path: Option<String>,
+    skip_header: bool,
+    include_metadata: bool,
+    csv_separator_str: &str,
+    hashes_str: String,
+    writer_rx: Receiver<WriterMsg>,
+) {
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output_path)
+        .unwrap();
+
+    let mut log_f = log_path.map(|log_path| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap()
+    });
+
+    if !skip_header {
+        if include_metadata {
+            let metadata_headers = format!(
+                "size{csv_separator_str}modified{csv_separator_str}accessed{csv_separator_str}created",
+            );
+            writeln!(
+                f,
+                "{hashes_str}{csv_separator_str}{metadata_headers}{csv_separator_str}path"
+            )
+            .ok();
+        } else {
+            writeln!(f, "{hashes_str}{csv_separator_str}path").ok();
+        }
+    }
+
+    while let Ok(msg) = writer_rx.recv() {
+        match msg {
+            WriterMsg::Hash(line) => {
+                writeln!(f, "{line}").ok();
+                if let Some(ref mut file) = log_f {
+                    writeln!(file, "HASH {line}").ok();
+                }
+            }
+            WriterMsg::Error(line) => {
+                if let Some(ref mut file) = log_f {
+                    writeln!(file, "ERR {line}").ok();
+                }
+            }
+            WriterMsg::Log(line) => {
+                if let Some(ref mut file) = log_f {
+                    writeln!(file, "LOG {line}").ok();
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn worker_loop(
     rx: Receiver<PathBuf>,
     writer_tx: Sender<WriterMsg>,
     hash_algorithm: &Arc<[Algorithm]>,
     csv_separator: &str,
     include_metadata: bool,
+    skip_std_out: bool,
 ) {
     for path in rx {
         let mut hashes = Vec::with_capacity(hash_algorithm.len());
@@ -232,8 +243,10 @@ fn worker_loop(
                 csv_separator,
                 path.display()
             );
-            writer_tx.send(WriterMsg::Hash(line.clone())).ok();
-            println!("{line}");
+            if !skip_std_out {
+                println!("{}", &line);
+            }
+            writer_tx.send(WriterMsg::Hash(line)).ok();
         }
     }
 }
