@@ -167,9 +167,6 @@ fn writer_loop(
                     println!("{}", &line);
                 }
                 writeln!(f, "{line}").ok();
-                if let Some(ref mut file) = log_f {
-                    writeln!(file, "HASH {line}").ok();
-                }
             }
             WriterMsg::Error(line) => {
                 if let Some(ref mut file) = log_f {
